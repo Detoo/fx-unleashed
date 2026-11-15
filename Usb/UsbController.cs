@@ -453,6 +453,8 @@ namespace User.FXProRpmSync
             ram = new ScreenRam(() => S.ScreenRam ?? (S.ScreenRam = new ScreenRamState()));
             thread = new Thread(Loop) { IsBackground = true, Name = "FXProRpmSync USB" };
             thread.Start();
+            rearmThread = new Thread(KeepInputReports) { IsBackground = true, Name = "FXProRpmSync input re-arm" };
+            rearmThread.Start();
         }
 
         private UsbSettings S => plugin.Settings.Usb;
@@ -1497,7 +1499,6 @@ namespace User.FXProRpmSync
             }
             // The logo goes out in slices (~24 commands per frame) so the lights keep animating while it draws in.
             if (saver != null && screen != null && pendingTiles == null) saver.Step(screen, now, 24);
-            KeepInputReports();
             if (screen != null) UploadTiles(now);
         }
 
@@ -1692,25 +1693,63 @@ namespace User.FXProRpmSync
             finally { try { screen.Cmd("ref_star"); screen.Flush(); } catch { } }
         }
 
-        private DateTime nextRearmCheck, lastRearm;
+        private readonly Thread rearmThread;
+
+        /// <summary>How long without an input report before the wheel's send flag is set again. The wheel sends one about
+        /// every millisecond, so 50 ms is a stuck flag, and short enough that a paddle shift isn't lost to it.</summary>
+        private static readonly long RearmAfterTicks = TimeSpan.FromMilliseconds(50).Ticks;
+
+        /// <summary>A stop still going after this is logged once (re-arming goes on): a stop that never ends would otherwise
+        /// leave nothing in the log, since a stop is logged when the reports come back.</summary>
+        private static readonly long StillStoppedTicks = TimeSpan.FromSeconds(1).Ticks;
 
         /// <summary>
         /// The stock bug behind dead buttons after a USB hiccup (FXProDashes firmware-notes.md "stuck buttons"): a report
         /// lost with a dropped link leaves the wheel's send flag cleared for good. Re-armed on every connect, but a drop
-        /// too brief for the plugin to see (2026-10-01: buttons dead while connected) needs this: no report for over a
-        /// second while the reader is open = stuck, so the flag is set again (one RAM write, harmless when not stuck).
+        /// too brief for the plugin to see (2026-10-01: buttons dead while connected) needs this: no report for 50 ms
+        /// while the reader is open = stuck, so the flag is set again (one RAM write, harmless when not stuck). On a
+        /// thread of its own, checked every 10 ms: in the frame loop, once a second, a stop lasted 1-2 s (more behind a
+        /// slow dash update) and lost paddle shifts (2026-11-14). Each stop is logged with how long the buttons were
+        /// silent, once the reports are back, and once more if it's still going after a second.
         /// </summary>
         private void KeepInputReports()
         {
-            var now = DateTime.UtcNow;
-            if ((conn == null || model != WheelModel.FxPro) && (fx == null || model != WheelModel.Fx) || now < nextRearmCheck) return;
-            nextRearmCheck = now.AddSeconds(1);
-            var b = plugin.Buttons;
-            if (b == null || !b.Found || now.Ticks - b.LastReportTicks < TimeSpan.FromSeconds(1).Ticks) return;
-            if (fx != null) FxWheel.ReleaseInputReports(fx); else FxUsb.ReleaseInputReports(conn);
-            if (now - lastRearm > TimeSpan.FromSeconds(30))
-                SimHub.Logging.Current.Info("[FXProRpmSync] USB mode: the wheel's button reports had stopped; started them again");
-            lastRearm = now;
+            long stoppedAt = 0, rearmedAt = 0;
+            int rearms = 0;
+            bool warned = false;
+            while (!stop)
+            {
+                Thread.Sleep(10);
+                try
+                {
+                    // the USB thread sets these up and clears them; a session closed under us only fails the write
+                    var c = Volatile.Read(ref conn);
+                    var f = Volatile.Read(ref fx);
+                    var m = model;
+                    var target = m == WheelModel.Fx ? f : m == WheelModel.FxPro ? c : null;
+                    var b = plugin.Buttons;
+                    if (target == null || b == null || !b.Found) { stoppedAt = 0; rearms = 0; warned = false; continue; }
+                    long last = b.LastReportTicks, now = DateTime.UtcNow.Ticks;
+                    if (stoppedAt != 0 && last > stoppedAt)
+                    {
+                        SimHub.Logging.Current.Info($"[FXProRpmSync] USB mode: the wheel's button reports had stopped for " +
+                            $"{(last - stoppedAt) / TimeSpan.TicksPerMillisecond} ms; started them again" + (rearms > 1 ? $" ({rearms} re-arms)" : ""));
+                        stoppedAt = 0; rearms = 0; warned = false;
+                    }
+                    if (stoppedAt != 0 && !warned && now - stoppedAt >= StillStoppedTicks)
+                    {
+                        SimHub.Logging.Current.Warn($"[FXProRpmSync] USB mode: the wheel's button reports are still stopped after " +
+                            $"{(now - stoppedAt) / TimeSpan.TicksPerMillisecond} ms ({rearms} re-arms); still trying");
+                        warned = true;
+                    }
+                    if (now - Math.Max(last, rearmedAt) < RearmAfterTicks) continue;
+                    if (stoppedAt == 0) stoppedAt = last;
+                    if (target == f) FxWheel.ReleaseInputReports(f); else FxUsb.ReleaseInputReports(c);
+                    rearmedAt = now;
+                    rearms++;
+                }
+                catch (Exception ex) { SimHub.Logging.Current.Debug("[FXProRpmSync] input re-arm: " + ex.Message); }
+            }
         }
 
         private void UploadTiles(double now)
@@ -1956,6 +1995,7 @@ namespace User.FXProRpmSync
             stop = true;
             wake.Set();
             thread.Join(3000);
+            rearmThread.Join(1000);
         }
     }
 }

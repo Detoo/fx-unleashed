@@ -178,8 +178,11 @@ Rule from both: before an upload the screen must be idle; keep whatever is drawn
 - **Build query retry**: right after a power cycle the wheel app doesn't answer the build query; the plugin asks
   again for ~6 s (it used to give up: no build = the dash button stayed in its old slot, dead).
 - **Stuck button reports** (a stock firmware bug): besides re-arming on connect, the plugin re-arms
-  `0x200002B8` whenever no input report has arrived for over 1 s while connected (`KeepInputReports`, logs "the wheel's
-  button reports had stopped"). A brief USB hiccup the plugin didn't see left the buttons dead (2026-10-01).
+  `0x200002B8` whenever no input report has arrived for 50 ms while connected (`KeepInputReports`, on its own thread,
+  checked every 10 ms; logs "the wheel's button reports had stopped for N ms" when they're back, and warns once
+  "still stopped after N ms" if a stop goes past 1 s). A brief USB hiccup the plugin didn't
+  see left the buttons dead (2026-10-01); checked once a second in the frame loop, a stop lasted 1-2 s and lost paddle
+  shifts (2026-11-14).
 - Dashes tab: Previous/Next red, **"Demo on the wheel"** runs the demo through the shown rotation (dash button cycles);
   API `POST /api/wheel/demo?dash=rotation`.
 - SimHub formulas that fail are skipped for 0.3 s (was 5 s: sector results showed up to ~10 s late).
