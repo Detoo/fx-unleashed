@@ -179,8 +179,10 @@ Rule from both: before an upload the screen must be idle; keep whatever is drawn
   again for ~6 s (it used to give up: no build = the dash button stayed in its old slot, dead).
 - **Stuck button reports** (a stock firmware bug): besides re-arming on connect, the plugin re-arms
   `0x200002B8` whenever no input report has arrived for 50 ms while connected (`KeepInputReports`, on its own thread,
-  checked every 10 ms; logs "the wheel's button reports had stopped for N ms" when they're back, and warns once
-  "still stopped after N ms" if a stop goes past 1 s). A brief USB hiccup the plugin didn't
+  checked every 10 ms). A stop of 200 ms or more logs "the wheel's button reports had stopped for N ms" when they're
+  back; shorter ones are counted into one line every 10 min and at disconnect ("stopped N times for under 200 ms"):
+  the wheel pauses its reports 50-160 ms by itself while the screen takes files (2026-11-15). A stop past 1 s warns
+  once, "still stopped after N ms". A brief USB hiccup the plugin didn't
   see left the buttons dead (2026-10-01); checked once a second in the frame loop, a stop lasted 1-2 s and lost paddle
   shifts (2026-11-14).
 - Dashes tab: Previous/Next red, **"Demo on the wheel"** runs the demo through the shown rotation (dash button cycles);

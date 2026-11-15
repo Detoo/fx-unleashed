@@ -1695,9 +1695,16 @@ namespace User.FXProRpmSync
 
         private readonly Thread rearmThread;
 
-        /// <summary>How long without an input report before the wheel's send flag is set again. The wheel sends one about
-        /// every millisecond, so 50 ms is a stuck flag, and short enough that a paddle shift isn't lost to it.</summary>
+        /// <summary>How long without an input report before the wheel's send flag is set again: short enough that a paddle
+        /// shift isn't lost to a stuck flag. The wheel sends one about every millisecond, but not always: while the screen
+        /// takes files it pauses 50-160 ms at a time (2026-11-15, 45 of them in a 6.4 s load), and those re-arms are harmless
+        /// (the load took as long as before, no write failed).</summary>
         private static readonly long RearmAfterTicks = TimeSpan.FromMilliseconds(50).Ticks;
+
+        /// <summary>A stop at least this long is logged on its own line; shorter ones (mostly the wheel's own pauses, above)
+        /// are only counted, in one line per <see cref="ShortStopSummaryTicks"/> and when the session ends.</summary>
+        private const long LogStopMs = 200;
+        private static readonly long ShortStopSummaryTicks = TimeSpan.FromMinutes(10).Ticks;
 
         /// <summary>A stop still going after this is logged once (re-arming goes on): a stop that never ends would otherwise
         /// leave nothing in the log, since a stop is logged when the reports come back.</summary>
@@ -1709,14 +1716,25 @@ namespace User.FXProRpmSync
         /// too brief for the plugin to see (2026-10-01: buttons dead while connected) needs this: no report for 50 ms
         /// while the reader is open = stuck, so the flag is set again (one RAM write, harmless when not stuck). On a
         /// thread of its own, checked every 10 ms: in the frame loop, once a second, a stop lasted 1-2 s (more behind a
-        /// slow dash update) and lost paddle shifts (2026-11-14). Each stop is logged with how long the buttons were
-        /// silent, once the reports are back, and once more if it's still going after a second.
+        /// slow dash update) and lost paddle shifts (2026-11-14). A stop of 200 ms or more is logged with how long the
+        /// buttons were silent, once the reports are back; shorter ones are summed up (ShortStops); one still going after a
+        /// second is warned about once.
         /// </summary>
         private void KeepInputReports()
         {
             long stoppedAt = 0, rearmedAt = 0;
             int rearms = 0;
             bool warned = false;
+            int shortStops = 0;
+            long shortLongestMs = 0, shortSince = 0;
+            void ShortStops()
+            {
+                if (shortStops == 0) return;
+                SimHub.Logging.Current.Info($"[FXProRpmSync] USB mode: the wheel's button reports stopped {shortStops} time" +
+                    (shortStops > 1 ? "s" : "") + $" for under {LogStopMs} ms in the last {Math.Max(1, (DateTime.UtcNow.Ticks - shortSince) / TimeSpan.TicksPerMinute)} min " +
+                    $"(longest {shortLongestMs} ms); started again each time");
+                shortStops = 0; shortLongestMs = 0;
+            }
             while (!stop)
             {
                 Thread.Sleep(10);
@@ -1728,14 +1746,22 @@ namespace User.FXProRpmSync
                     var m = model;
                     var target = m == WheelModel.Fx ? f : m == WheelModel.FxPro ? c : null;
                     var b = plugin.Buttons;
-                    if (target == null || b == null || !b.Found) { stoppedAt = 0; rearms = 0; warned = false; continue; }
+                    if (target == null || b == null || !b.Found) { ShortStops(); stoppedAt = 0; rearms = 0; warned = false; continue; }
                     long last = b.LastReportTicks, now = DateTime.UtcNow.Ticks;
                     if (stoppedAt != 0 && last > stoppedAt)
                     {
-                        SimHub.Logging.Current.Info($"[FXProRpmSync] USB mode: the wheel's button reports had stopped for " +
-                            $"{(last - stoppedAt) / TimeSpan.TicksPerMillisecond} ms; started them again" + (rearms > 1 ? $" ({rearms} re-arms)" : ""));
+                        long ms = (last - stoppedAt) / TimeSpan.TicksPerMillisecond;
+                        if (ms >= LogStopMs)
+                            SimHub.Logging.Current.Info($"[FXProRpmSync] USB mode: the wheel's button reports had stopped for " +
+                                $"{ms} ms; started them again" + (rearms > 1 ? $" ({rearms} re-arms)" : ""));
+                        else
+                        {
+                            if (shortStops++ == 0) shortSince = now;
+                            shortLongestMs = Math.Max(shortLongestMs, ms);
+                        }
                         stoppedAt = 0; rearms = 0; warned = false;
                     }
+                    if (shortStops > 0 && now - shortSince >= ShortStopSummaryTicks) ShortStops();
                     if (stoppedAt != 0 && !warned && now - stoppedAt >= StillStoppedTicks)
                     {
                         SimHub.Logging.Current.Warn($"[FXProRpmSync] USB mode: the wheel's button reports are still stopped after " +
